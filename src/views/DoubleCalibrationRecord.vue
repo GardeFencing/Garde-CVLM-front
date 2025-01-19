@@ -47,7 +47,13 @@
       </v-row>
     </div>
     <canvas id="canvas" style="z-index: 0;" v-show="!showFencingImage" />
-    <video autoplay id="video-tag" style="display: none;"></video>
+    <video 
+      ref="videoElement" 
+      id="video-tag" 
+      autoplay 
+      playsinline
+      style="display: none;"
+    ></video>
   </div>
 </template>
 
@@ -87,6 +93,9 @@ export default {
       heatmapIntensity: 50,
       densityMap: {},           // Persistent density map
       analysisStartTime: null,
+      sensitivityMultiplier: 1.5, // Adjust this value to change sensitivity
+      previousGazePoints: [], // Store last few gaze points
+      smoothingWindow: 3,    // Number of points to average
     };
   },
   computed: {
@@ -195,31 +204,52 @@ export default {
       point.data = [];
       for (var a = 0; a < this.predByPointCount;) {
         const prediction = await this.detectFace();
+        if (!prediction || !prediction[0]) {
+          console.log('No face detected, retrying...');
+          await new Promise(resolve => setTimeout(resolve, 500));
+          continue;
+        }
+
         const pred = prediction[0];
-        // left eye
+        
+        // Safely access annotations
+        if (!pred.annotations || !pred.annotations.leftEyeIris || !pred.annotations.rightEyeIris) {
+          console.log('Eye features not detected, retrying...');
+          await new Promise(resolve => setTimeout(resolve, 500));
+          continue;
+        }
+
         const leftIris = pred.annotations.leftEyeIris;
-        const leftEyelid = pred.annotations.leftEyeUpper0.concat(pred.annotations.leftEyeLower0);
+        const leftEyelid = pred.annotations.leftEyeUpper0?.concat(pred.annotations.leftEyeLower0);
+        const rightIris = pred.annotations.rightEyeIris;
+        const rightEyelid = pred.annotations.rightEyeUpper0?.concat(pred.annotations.rightEyeLower0);
+
+        if (!leftEyelid || !rightEyelid) {
+          console.log('Eyelid features not detected, retrying...');
+          await new Promise(resolve => setTimeout(resolve, 500));
+          continue;
+        }
+
         const leftEyelidTip = leftEyelid[3];
         const leftEyelidBottom = leftEyelid[11];
-        const isLeftBlink = this.calculateDistance(leftEyelidTip, leftEyelidBottom) < this.leftEyeTreshold;
-        // right eye
-        const rightIris = pred.annotations.rightEyeIris;
-        const rightEyelid = pred.annotations.rightEyeUpper0.concat(pred.annotations.rightEyeLower0);
         const rightEyelidTip = rightEyelid[3];
         const rightEyelidBottom = rightEyelid[11];
+
+        const isLeftBlink = this.calculateDistance(leftEyelidTip, leftEyelidBottom) < this.leftEyeTreshold;
         const isRightBlink = this.calculateDistance(rightEyelidTip, rightEyelidBottom) < this.rightEyeTreshold;
 
         if (isLeftBlink || isRightBlink) {
-          console.log('eyes closed, disconsidered');
-          // set timer so that when eyes open it doesnt select the unstable values
+          console.log('Eyes closed, disconsidered');
           await new Promise(resolve => setTimeout(resolve, 500));
-        } else {
-          const newPrediction = { leftIris: leftIris[0], rightIris: rightIris[0] };
-          point.data.push(newPrediction);
-          const radius = (this.radius / this.predByPointCount) * a
-          this.drawPoint(point.x, point.y, radius)
-          a++;
+          continue;
         }
+
+        const newPrediction = { leftIris: leftIris[0], rightIris: rightIris[0] };
+        point.data.push(newPrediction);
+        const radius = (this.radius / this.predByPointCount) * a;
+        this.drawPoint(point.x, point.y, radius);
+        a++;
+        
         await new Promise(resolve => setTimeout(resolve, timeBetweenCaptures));
       }
     },
@@ -369,36 +399,81 @@ export default {
     // canvas related
     async startWebCamCapture() {
       try {
+        // Wait for video element to be available
+        await this.$nextTick();
+        const videoElement = this.$refs.videoElement;
+        
+        if (!videoElement) {
+            throw new Error('Video element not found');
+        }
+
         const stream = await navigator.mediaDevices.getUserMedia({
-          audio: false,
-          video: {
-            width: { ideal: 1280 },
-            height: { ideal: 720 }
-          }
+            audio: false,
+            video: {
+                width: { ideal: 640 },
+                height: { ideal: 480 },
+                facingMode: "user"
+            }
         });
         
-        const videoElement = document.getElementById('video-tag');
-        if (videoElement) {
-          videoElement.srcObject = stream;
-          // Wait for video metadata to load
-          await new Promise((resolve) => {
+        videoElement.srcObject = stream;
+        
+        // Wait for video to be ready
+        await new Promise((resolve) => {
             videoElement.onloadedmetadata = () => {
-              this.videoWidth = videoElement.videoWidth;
-              this.videoHeight = videoElement.videoHeight;
-              resolve();
+                videoElement.width = 640;
+                videoElement.height = 480;
+                this.videoWidth = videoElement.videoWidth;
+                this.videoHeight = videoElement.videoHeight;
+                resolve();
             };
-          });
-        }
+        });
+
+        // Wait for first frame
+        await new Promise((resolve) => {
+            videoElement.onloadeddata = () => {
+                // Ensure video is playing
+                videoElement.play().catch(console.error);
+                resolve();
+            };
+        });
+
+        // Wait a bit more to ensure everything is stable
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        
       } catch (error) {
         console.error('Error accessing webcam:', error);
+        throw error;
       }
     },
 
     async detectFace() {
-      const lastPrediction = await this.model.estimateFaces({
-        input: document.getElementById("video-tag"),
-      });
-      return lastPrediction
+      try {
+        const videoElement = this.$refs.videoElement;
+        if (!videoElement || !videoElement.videoWidth || !videoElement.videoHeight) {
+          console.warn('Video not ready for face detection');
+          return null;
+        }
+
+        if (!this.model) {
+          console.warn('Face detection model not loaded');
+          return null;
+        }
+
+        const prediction = await this.model.estimateFaces({
+          input: videoElement,
+        });
+
+        if (!prediction || !prediction[0] || !prediction[0].annotations) {
+          console.warn('No valid face detection results');
+          return null;
+        }
+
+        return prediction;
+      } catch (error) {
+        console.error('Face detection error:', error);
+        return null;
+      }
     },
 
     stopRecord() {
@@ -412,6 +487,12 @@ export default {
 
     initializeEyeTracking() {
       if (!this.$refs.fencingImage) return;
+
+      const videoElement = document.getElementById('video-tag');
+      if (!videoElement || !videoElement.videoWidth || !videoElement.videoHeight) {
+        console.error('Video element not properly initialized');
+        return;
+      }
 
       const canvas = document.getElementById('eyeTrackingCanvas');
       const heatmapCanvas = document.getElementById('heatmapCanvas');
@@ -431,46 +512,107 @@ export default {
       this.gazeHistory = [];
       this.densityMap = {};
       
-      // Start continuous eye tracking
-      this.eyeTrackingInterval = setInterval(async () => {
-        try {
-          const prediction = await this.detectFace();
-          if (prediction && prediction[0]) {
-            const pred = prediction[0];
-            const leftIris = pred.annotations.leftEyeIris[0];
-            const rightIris = pred.annotations.rightEyeIris[0];
+      // Start continuous eye tracking with a slight delay to ensure video is ready
+      setTimeout(() => {
+        this.eyeTrackingInterval = setInterval(async () => {
+          try {
+            if (!videoElement.videoWidth || !videoElement.videoHeight) {
+              console.warn('Video dimensions not ready');
+              return;
+            }
 
-            this.currentGazeX = (leftIris[0] + rightIris[0]) / 2;
-            this.currentGazeY = (leftIris[1] + rightIris[1]) / 2;
+            const prediction = await this.detectFace();
+            if (prediction && prediction[0]) {
+              const pred = prediction[0];
+              const leftIris = pred.annotations.leftEyeIris[0];
+              const rightIris = pred.annotations.rightEyeIris[0];
 
-            const now = Date.now();
-            
-            // Add to current window's gaze history
-            this.gazeHistory.push({ 
-              x: this.currentGazeX, 
-              y: this.currentGazeY,
-              timestamp: now
-            });
+              this.updateGazePosition(leftIris, rightIris);
 
-            // Check if current 5-second window is complete
-            if (now - this.windowStartTime >= 5000) {
-              // Update heatmap with current window's data
-              this.generateHeatmap();
+              const now = Date.now();
               
-              // Clear current window data and reset timer
-              this.gazeHistory = [];
-              this.windowStartTime = now;
-            }
+              // Add to current window's gaze history
+              this.gazeHistory.push({ 
+                x: this.currentGazeX, 
+                y: this.currentGazeY,
+                timestamp: now
+              });
 
-            // Draw current gaze point and trail
-            if (canvas) {
-              this.drawGazeOverlay();
+              // Check if current 5-second window is complete
+              if (now - this.windowStartTime >= 5000) {
+                this.generateHeatmap();
+                this.gazeHistory = [];
+                this.windowStartTime = now;
+              }
+
+              // Draw current gaze point and trail
+              if (canvas) {
+                this.drawGazeOverlay();
+              }
             }
+          } catch (error) {
+            console.error('Eye tracking error:', error);
           }
-        } catch (error) {
-          console.error('Eye tracking error:', error);
-        }
-      }, 50);
+        }, 25);
+      }, 1000); // 1 second delay to ensure video is fully initialized
+    },
+
+    updateGazePosition(leftIris, rightIris) {
+      const videoElement = document.getElementById('video-tag');
+      const fencingImage = this.$refs.fencingImage;
+      
+      if (!videoElement || !fencingImage) return;
+      
+      // Calculate center point between eyes
+      const newX = (leftIris[0] + rightIris[0]) / 2;
+      const newY = (leftIris[1] + rightIris[1]) / 2;
+      
+      // Calculate eye distance for scaling
+      const eyeDistance = Math.sqrt(
+          Math.pow(rightIris[0] - leftIris[0], 2) + 
+          Math.pow(rightIris[1] - leftIris[1], 2)
+      );
+      
+      // Get the neutral position (center of video)
+      const centerX = videoElement.videoWidth / 2;
+      const centerY = videoElement.videoHeight / 2;
+      
+      // Calculate offset from center, normalized by eye distance
+      const offsetX = (newX - centerX) / eyeDistance;
+      const offsetY = (newY - centerY) / eyeDistance;
+      
+      // Apply non-linear scaling for better edge response
+      const scaledX = Math.sign(offsetX) * Math.pow(Math.abs(offsetX) * 3, 1.5);
+      const scaledY = Math.sign(offsetY) * Math.pow(Math.abs(offsetY) * 3, 1.5);
+      
+      // Map to image dimensions with enhanced range
+      const mappedX = (0.5 + scaledX) * fencingImage.width;
+      const mappedY = (0.5 + scaledY) * fencingImage.height;
+      
+      // Apply smoothing
+      this.previousGazePoints.push({x: mappedX, y: mappedY});
+      if (this.previousGazePoints.length > this.smoothingWindow) {
+          this.previousGazePoints.shift();
+      }
+      
+      // Weighted average (recent points have more weight)
+      let totalWeight = 0;
+      let weightedX = 0;
+      let weightedY = 0;
+      
+      this.previousGazePoints.forEach((point, index) => {
+          const weight = (index + 1);
+          weightedX += point.x * weight;
+          weightedY += point.y * weight;
+          totalWeight += weight;
+      });
+      
+      this.currentGazeX = weightedX / totalWeight;
+      this.currentGazeY = weightedY / totalWeight;
+      
+      // Ensure coordinates stay within bounds
+      this.currentGazeX = Math.max(0, Math.min(this.currentGazeX, fencingImage.width));
+      this.currentGazeY = Math.max(0, Math.min(this.currentGazeY, fencingImage.height));
     },
 
     generateHeatmap() {
@@ -550,6 +692,38 @@ export default {
         clearInterval(this.eyeTrackingInterval);
       }
       this.$router.push('/postCalibration');
+    },
+
+    async validateCalibration() {
+      const validationPoints = [];
+      const screenWidth = window.innerWidth;
+      const screenHeight = window.innerHeight;
+      
+      // Test points in a grid
+      for (let x = 0.1; x <= 0.9; x += 0.2) {
+          for (let y = 0.1; y <= 0.9; y += 0.2) {
+              validationPoints.push({
+                  x: x * screenWidth,
+                  y: y * screenHeight
+              });
+          }
+      }
+      
+      let totalError = 0;
+      for (const point of validationPoints) {
+          const prediction = await this.predictGazePoint();
+          const error = Math.sqrt(
+              Math.pow(prediction.x - point.x, 2) + 
+              Math.pow(prediction.y - point.y, 2)
+          );
+          totalError += error;
+      }
+      
+      const averageError = totalError / validationPoints.length;
+      if (averageError > 50) { // 50 pixels threshold
+          // Recalibrate if accuracy is poor
+          this.recalibrate();
+      }
     },
   },
 
