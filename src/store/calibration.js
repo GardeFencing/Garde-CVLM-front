@@ -1,6 +1,9 @@
 import axios from 'axios';
-import firebase from 'firebase/app';
 import router from '@/router';
+
+// Helper function to generate unique IDs
+const generateId = () => '_' + Math.random().toString(36).substr(2, 9);
+
 export default {
     state: {
         calibName: '',
@@ -108,17 +111,20 @@ export default {
     },
     actions: {
         async saveCalib(context) {
-            const state = context.state
-            const db = firebase.firestore()
-            const calibrationData = { ...state }
-            delete calibrationData.calibrations
+            const state = context.state;
+            const calibrationData = { ...state, id: generateId() };
+            delete calibrationData.calibrations;
+            
             try {
-                const calibrationsCollection = db.collection('calibrations');
-                await calibrationsCollection.add(calibrationData);
-                console.log('Data successfully saved to calibrations collection!');
-                context.dispatch('getAllCalibs')
+                // Get existing calibrations from localStorage
+                const existingCalibs = JSON.parse(localStorage.getItem('calibrations') || '[]');
+                existingCalibs.push(calibrationData);
+                localStorage.setItem('calibrations', JSON.stringify(existingCalibs));
+                
+                console.log('Data successfully saved to local storage!');
+                context.dispatch('getAllCalibs');
             } catch (error) {
-                console.error('Error saving data to calibrations collection:', error);
+                console.error('Error saving data to local storage:', error);
             }
         },
         async selectCalib({ commit }, calibData) {
@@ -142,26 +148,21 @@ export default {
         },
         async getAllCalibs({ commit }) {
             try {
-                const db = firebase.firestore();
-                const calibrationsCollection = await db.collection('calibrations').get();
-
-                const calibrations = [];
-                calibrationsCollection.forEach(doc => {
-                    var averageAccuracy = 0
-                    var averagePrecision = 0
-                    var data = doc.data()
+                const calibrations = JSON.parse(localStorage.getItem('calibrations') || '[]');
+                
+                // Calculate averages
+                calibrations.forEach(data => {
+                    var averageAccuracy = 0;
+                    var averagePrecision = 0;
                     data.pattern.forEach(element => {
                         averageAccuracy += Number(element.accuracy);
                         averagePrecision += Number(element.precision);
-                    })
-                    data.averageAccuracy = averageAccuracy / data.pattern.length
-                    data.averagePrecision = averagePrecision / data.pattern.length
-                    calibrations.push({
-                        id: doc.id, ...data
                     });
+                    data.averageAccuracy = averageAccuracy / data.pattern.length;
+                    data.averagePrecision = averagePrecision / data.pattern.length;
                 });
 
-                commit('setCalibrations', calibrations)
+                commit('setCalibrations', calibrations);
             } catch (error) {
                 console.error('Error getting calibrations:', error);
                 throw error;
@@ -169,10 +170,10 @@ export default {
         },
         async deleteCalib({ dispatch }, calib) {
             try {
-                const db = firebase.firestore();
-                const calibrationsCollection = db.collection('calibrations');
-                await calibrationsCollection.doc(calib.id).delete();
-                dispatch('getAllCalibs')
+                const calibrations = JSON.parse(localStorage.getItem('calibrations') || '[]');
+                const filteredCalibs = calibrations.filter(c => c.id !== calib.id);
+                localStorage.setItem('calibrations', JSON.stringify(filteredCalibs));
+                dispatch('getAllCalibs');
             } catch (error) {
                 console.error('Error deleting calibration:', error);
                 return { success: false, message: 'Failed to delete calibration' };

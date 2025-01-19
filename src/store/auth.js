@@ -1,9 +1,7 @@
-import auth from "@/models/auth";
-
 export default {
   state: {
-    user: null,
-    loading: null,
+    user: { displayName: 'Guest User', email: 'guest@example.com', uid: 'guest' },
+    loading: false,
   },
   getters: {
     getLoading(state) {
@@ -23,29 +21,16 @@ export default {
   },
   actions: {
     async signinwithgoogle({ commit }) {
-      try {
-        var user = await auth.signInWithGoogle(commit);
-        user = (({ displayName, email, uid }) => ({ displayName, email, uid }))(
-          user
-        );
-        commit("setUser", user);
-        return user;
-      } catch (err) {
-        console.error('"Error when creating user.', err);
-      }
+      // Skip authentication and return default user
+      const defaultUser = { displayName: 'Guest User', email: 'guest@example.com', uid: 'guest' };
+      commit("setUser", defaultUser);
+      return defaultUser;
     },
     async autoSignIn({ commit }) {
-      try {
-        var user = await auth.autoSignIn();
-        if (!user) return null;
-        user = (({ displayName, email, uid }) => ({ displayName, email, uid }))(
-          user
-        );
-        commit("setUser", user);
-        return user;
-      } catch (err) {
-        console.error("Error when signin.", err);
-      }
+      // Return default user without authentication
+      const defaultUser = { displayName: 'Guest User', email: 'guest@example.com', uid: 'guest' };
+      commit("setUser", defaultUser);
+      return defaultUser;
     },
   },
 };

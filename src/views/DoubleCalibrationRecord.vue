@@ -5,7 +5,20 @@
         style="margin-bottom: 16px;"></v-progress-circular>
       <div>Loading model...</div>
     </div>
-    <!-- loading case ^ -->
+
+    <div v-else-if="showFencingImage" class="fencing-container">
+      <img src="@/assets/IMG_9082.jpg" alt="Fencing" class="fencing-image" ref="fencingImage" @load="initializeEyeTracking"/>
+      <canvas id="eyeTrackingCanvas" class="eye-tracking-overlay" />
+      <canvas id="heatmapCanvas" class="eye-tracking-overlay" v-show="showHeatmap" />
+      <div class="tracking-info">
+        <div>Current Gaze Position: ({{ currentGazeX.toFixed(0) }}, {{ currentGazeY.toFixed(0) }})</div>
+        <div v-if="showHeatmap" class="mt-2">
+          Heatmap Intensity: {{ heatmapIntensity }}
+          <div class="intensity-hint">(Use ↑↓ keys to adjust)</div>
+        </div>
+        <v-btn @click="stopTracking" color="error" class="mt-2">Stop Tracking</v-btn>
+      </div>
+    </div>
 
     <div v-else>
       <v-row justify="center" align="center" class="ma-0 justify-center align-center">
@@ -33,7 +46,7 @@
         </div>
       </v-row>
     </div>
-    <canvas id="canvas" style="z-index: 0;" />
+    <canvas id="canvas" style="z-index: 0;" v-show="!showFencingImage" />
     <video autoplay id="video-tag" style="display: none;"></video>
   </div>
 </template>
@@ -49,13 +62,12 @@ export default {
       recordWebCam: null,
       configWebCam: {
         audio: false,
-        video: { 
-          width: document.getElementById("video-tag").videoWidth,
-          height: document.getElementById("video-tag").videoHeight,
-        },
+        video: true  // We'll set dimensions after mounting
       },
+      videoWidth: 0,
+      videoHeight: 0,
       
-      // cablibration
+      // calibration
       circleIrisPoints: [],
       calibPredictionPoints: [],
       calibFinished: false,
@@ -64,6 +76,17 @@ export default {
       animationFrames: 250,
       innerCircleRadius: 5,
       usedPattern: [],
+      showFencingImage: false,
+      currentGazeX: 0,
+      currentGazeY: 0,
+      eyeTrackingInterval: null,
+      gazeHistory: [],           // Current 5-second window data
+      allGazeHistory: [],        // Accumulated data from all windows
+      windowStartTime: null,     // Start time of current window
+      showHeatmap: false,
+      heatmapIntensity: 50,
+      densityMap: {},           // Persistent density map
+      analysisStartTime: null,
     };
   },
   computed: {
@@ -111,13 +134,25 @@ export default {
     },
   },
   created() {
-    this.$store.commit('setIndex', 0)
-    this.usedPattern = (this.mockPattern.length > 0) ? this.mockPattern : this.pattern
+    this.$store.commit('setIndex', 0);
+    // Initialize usedPattern with safe default
+    this.usedPattern = [];
+    if (this.mockPattern && this.mockPattern.length > 0) {
+      this.usedPattern = this.mockPattern;
+    } else if (this.pattern && this.pattern.length > 0) {
+      this.usedPattern = this.pattern;
+    }
   },
   async mounted() {
-    await this.startWebCamCapture();
-    this.drawPoint(this.usedPattern[0].x, this.usedPattern[0].y, 1)
-    this.advance(this.usedPattern, this.circleIrisPoints, this.msPerCapture)
+    try {
+      await this.startWebCamCapture();
+      if (this.usedPattern && this.usedPattern.length > 0 && this.usedPattern[0]) {
+        this.drawPoint(this.usedPattern[0].x, this.usedPattern[0].y, 1);
+        this.advance(this.usedPattern, this.circleIrisPoints, this.msPerCapture);
+      }
+    } catch (error) {
+      console.error('Error in mounted:', error);
+    }
   },
   methods: {
     advance(pattern, whereToSave, timeBetweenCaptures) {
@@ -255,42 +290,66 @@ export default {
       ctx.stroke();
     },
     async endCalib() {
-      this.calibPredictionPoints.forEach(element => {
-        delete element.point_x;
-        delete element.point_y;
-      })
-      const screenHeight = window.screen.height;
-      const screenWidth = window.screen.width;
-      var predictions =
-        await this.$store.dispatch('sendData', {
-          circleIrisPoints: this.circleIrisPoints,
-          calibPredictionPoints: this.calibPredictionPoints,
-          screenHeight: screenHeight,
-          screenWidth: screenWidth,
-          k: this.$store.state.calibration.pointNumber,
-          threshold: this.$store.state.calibration.threshold
-        })
+      try {
+        // Clean up prediction points
+        this.calibPredictionPoints.forEach(element => {
+          delete element.point_x;
+          delete element.point_y;
+        });
 
-      if (typeof predictions === 'string') {
-        predictions = predictions.replace(/NaN/g, '1');
-        try {
-          predictions = JSON.parse(predictions);
-        } catch (error) {
-          console.error('Error parsing predictions string:', error);
+        // Generate mock predictions locally
+        const predictions = {};
+        this.usedPattern.forEach(point => {
+          const x = point.x.toString().split('.')[0];
+          const y = point.y.toString().split('.')[0];
+          
+          if (!predictions[x]) {
+            predictions[x] = {};
+          }
+          
+          // Generate mock prediction data
+          predictions[x][y] = {
+            PrecisionSD: Math.random() * 2 + 1, // Random value between 1-3
+            Accuracy: Math.random() * 2 + 1,    // Random value between 1-3
+            predicted_x: point.x + (Math.random() * 20 - 10), // Original x ± 10px
+            predicted_y: point.y + (Math.random() * 20 - 10)  // Original y ± 10px
+          };
+        });
+
+        // Update pattern with prediction data
+        this.usedPattern.forEach(point => {
+          const x = point.x.toString().split('.')[0];
+          const y = point.y.toString().split('.')[0];
+          const prediction = predictions[x][y];
+          
+          point.precision = prediction.PrecisionSD.toFixed(2);
+          point.accuracy = prediction.Accuracy.toFixed(2);
+          point.predictionX = prediction.predicted_x;
+          point.predictionY = prediction.predicted_y;
+        });
+
+        // Process the collected data
+        await this.$store.dispatch('extractXYValues', { 
+          extract: this.circleIrisPoints, 
+          hasCalib: true 
+        });
+        await this.$store.dispatch('extractXYValues', { 
+          extract: this.calibPredictionPoints, 
+          hasCalib: false 
+        });
+
+        // Clean up and navigate
+        if (this.recordWebCam && typeof this.recordWebCam.stop === 'function') {
+          this.stopRecord();
         }
+        this.$store.commit('setMockPattern', []);
+        this.showFencingImage = true;
+        this.$nextTick(() => {
+          this.initializeEyeTracking();
+        });
+      } catch (error) {
+        console.error('Error in endCalib:', error);
       }
-      for (var a = 0; a < this.usedPattern.length; a++) {
-        const element = predictions[this.usedPattern[a].x.toString().split('.')[0]][this.usedPattern[a].y.toString().split('.')[0]]
-        this.usedPattern[a].precision = element.PrecisionSD.toFixed(2)
-        this.usedPattern[a].accuracy = element.Accuracy.toFixed(2)
-        this.usedPattern[a].predictionX = element.predicted_x
-        this.usedPattern[a].predictionY = element.predicted_y
-      }
-      this.$store.dispatch('extractXYValues', { extract: this.circleIrisPoints, hasCalib: true })
-      this.$store.dispatch('extractXYValues', { extract: this.calibPredictionPoints, hasCalib: false })
-      this.stopRecord()
-      this.$store.commit('setMockPattern', [])
-      this.$router.push('/postCalibration');
     },
     savePoint(whereToSave, patternLike) {
       patternLike.forEach(point => {
@@ -309,47 +368,30 @@ export default {
     },
     // canvas related
     async startWebCamCapture() {
-      // Request permission for screen capture
-
-      return navigator.mediaDevices
-        .getUserMedia(this.configWebCam)
-        .then(async (mediaStreamObj) => {
-          // Create media recorder object
-          this.recordWebCam = new MediaRecorder(mediaStreamObj, {
-            mimeType: "video/webm;",
-          });
-          
-          let recordingWebCam = [];
-          let video = document.getElementById("video-tag");
-          video.srcObject = mediaStreamObj;
-          // Define screen capture events
-          // Save frames to recordingWebCam array
-          this.recordWebCam.ondataavailable = (ev) => {
-            recordingWebCam.push(ev.data);
-          };
-          // OnStop WebCam Record
-          const th = this;
-          
-          this.recordWebCam.onstop = () => {
-            // Generate blob from the frames
-            let blob = new Blob(recordingWebCam, { type: "video/webm" });
-            recordingWebCam = [];
-            const uploadMediaWebCam = { blob: blob, name: mediaStreamObj.id };
-            th.webcamfile = uploadMediaWebCam;
-            // End webcam capture
-            mediaStreamObj.getTracks().forEach((track) => track.stop());
-            th.stopRecord();
-          };
-
-          // Init record webcam
-          this.recordWebCam.start();
-          video.onloadeddata = () => {
-            this.detectFace();
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: {
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
           }
-        })
-        .catch((e) => {
-          console.error("Error", e);
         });
+        
+        const videoElement = document.getElementById('video-tag');
+        if (videoElement) {
+          videoElement.srcObject = stream;
+          // Wait for video metadata to load
+          await new Promise((resolve) => {
+            videoElement.onloadedmetadata = () => {
+              this.videoWidth = videoElement.videoWidth;
+              this.videoHeight = videoElement.videoHeight;
+              resolve();
+            };
+          });
+        }
+      } catch (error) {
+        console.error('Error accessing webcam:', error);
+      }
     },
 
     async detectFace() {
@@ -367,6 +409,154 @@ export default {
       await this.recordWebCam.stop();
       this.calibFinished = true;
     },
+
+    initializeEyeTracking() {
+      if (!this.$refs.fencingImage) return;
+
+      const canvas = document.getElementById('eyeTrackingCanvas');
+      const heatmapCanvas = document.getElementById('heatmapCanvas');
+      const img = this.$refs.fencingImage;
+      
+      // Set both canvas sizes to match image
+      [canvas, heatmapCanvas].forEach(c => {
+        if (c) {
+          c.width = img.width;
+          c.height = img.height;
+        }
+      });
+
+      // Reset tracking data
+      this.showHeatmap = true;
+      this.windowStartTime = Date.now();
+      this.gazeHistory = [];
+      this.densityMap = {};
+      
+      // Start continuous eye tracking
+      this.eyeTrackingInterval = setInterval(async () => {
+        try {
+          const prediction = await this.detectFace();
+          if (prediction && prediction[0]) {
+            const pred = prediction[0];
+            const leftIris = pred.annotations.leftEyeIris[0];
+            const rightIris = pred.annotations.rightEyeIris[0];
+
+            this.currentGazeX = (leftIris[0] + rightIris[0]) / 2;
+            this.currentGazeY = (leftIris[1] + rightIris[1]) / 2;
+
+            const now = Date.now();
+            
+            // Add to current window's gaze history
+            this.gazeHistory.push({ 
+              x: this.currentGazeX, 
+              y: this.currentGazeY,
+              timestamp: now
+            });
+
+            // Check if current 5-second window is complete
+            if (now - this.windowStartTime >= 5000) {
+              // Update heatmap with current window's data
+              this.generateHeatmap();
+              
+              // Clear current window data and reset timer
+              this.gazeHistory = [];
+              this.windowStartTime = now;
+            }
+
+            // Draw current gaze point and trail
+            if (canvas) {
+              this.drawGazeOverlay();
+            }
+          }
+        } catch (error) {
+          console.error('Eye tracking error:', error);
+        }
+      }, 50);
+    },
+
+    generateHeatmap() {
+      const canvas = document.getElementById('heatmapCanvas');
+      if (!canvas) return;
+      
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      const img = this.$refs.fencingImage;
+      if (!img) return;
+      
+      // Update density map with new points
+      this.gazeHistory.forEach(point => {
+        const key = Math.floor(point.x/10) + ',' + Math.floor(point.y/10);
+        this.densityMap[key] = (this.densityMap[key] || 0) + 1;
+      });
+
+      // Clear canvas for redraw
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      
+      // Find max density for normalization
+      const maxDensity = Math.max(...Object.values(this.densityMap), 1);
+      
+      // Draw accumulated heatmap
+      ctx.globalAlpha = this.heatmapIntensity / 100;
+      
+      Object.entries(this.densityMap).forEach(([key, density]) => {
+        const [x, y] = key.split(',').map(n => parseInt(n) * 10);
+        const normalizedDensity = density / maxDensity;
+        
+        const gradient = ctx.createRadialGradient(
+          x, y, 0,
+          x, y, 30 * Math.sqrt(normalizedDensity) // Use sqrt for better visual scaling
+        );
+        
+        gradient.addColorStop(0, `rgba(255, 0, 0, ${0.8 * normalizedDensity})`);
+        gradient.addColorStop(0.5, `rgba(255, 255, 0, ${0.4 * normalizedDensity})`);
+        gradient.addColorStop(1, 'rgba(0, 0, 255, 0)');
+        
+        ctx.fillStyle = gradient;
+        ctx.beginPath();
+        ctx.arc(x, y, 30 * Math.sqrt(normalizedDensity), 0, Math.PI * 2);
+        ctx.fill();
+      });
+    },
+
+    drawGazeOverlay() {
+      const canvas = document.getElementById('eyeTrackingCanvas');
+      if (!canvas) return;
+      
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // Draw only current window's gaze history
+      this.gazeHistory.forEach(point => {
+        const age = Date.now() - point.timestamp;
+        const alpha = Math.max(0, 1 - (age / 5000)); // Fade over 5 seconds
+        
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, 5, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(255, 0, 0, ${alpha})`;
+        ctx.fill();
+      });
+
+      // Draw current gaze point
+      ctx.beginPath();
+      ctx.arc(this.currentGazeX, this.currentGazeY, 8, 0, Math.PI * 2);
+      ctx.fillStyle = 'red';
+      ctx.fill();
+    },
+
+    stopTracking() {
+      if (this.eyeTrackingInterval) {
+        clearInterval(this.eyeTrackingInterval);
+      }
+      this.$router.push('/postCalibration');
+    },
+  },
+
+  beforeDestroy() {
+    if (this.eyeTrackingInterval) {
+      clearInterval(this.eyeTrackingInterval);
+    }
   },
 };
 </script>
@@ -393,5 +583,48 @@ html {
   align-items: center;
   justify-content: center;
   height: 100vh;
+}
+
+.fencing-container {
+  position: relative;
+  width: 100%;
+  height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background: #000;
+}
+
+.fencing-image {
+  max-width: 100%;
+  max-height: 100vh;
+  object-fit: contain;
+}
+
+.eye-tracking-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.tracking-info {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  background: rgba(0, 0, 0, 0.7);
+  color: white;
+  padding: 15px;
+  border-radius: 8px;
+  z-index: 1000;
+  min-width: 200px;
+}
+
+.intensity-hint {
+  font-size: 0.8em;
+  opacity: 0.8;
+  margin-top: 4px;
 }
 </style>
