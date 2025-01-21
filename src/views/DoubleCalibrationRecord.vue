@@ -106,9 +106,7 @@
 </template>
 
 <script>
-
 export default {
-  
   data() {
     return {
       // camera
@@ -144,7 +142,7 @@ export default {
       sensitivityMultiplier: 1.5, // Adjust this value to change sensitivity
       previousGazePoints: [], // Store last few gaze points
       smoothingWindow: 3,    // Number of points to average
-      calibrationMatrix: null,
+      calibrationMatrix: null, // Will store the linear transform parameters
       lastKnownGoodGaze: { x: 0, y: 0 },
       gazeVelocity: { x: 0, y: 0 },
       lastUpdateTime: null,
@@ -234,40 +232,40 @@ export default {
   },
   methods: {
     advance(pattern, whereToSave, timeBetweenCaptures) {
-      const th = this
-      var i = 0
+      const th = this;
+      var i = 0;
       async function keydownHandler(event) {
         if ((event.key === "s" || event.key === "S")) {
           if (i <= pattern.length - 1) {
-            document.removeEventListener('keydown', keydownHandler)
-            await th.extract(pattern[i], timeBetweenCaptures)
+            document.removeEventListener('keydown', keydownHandler);
+            await th.extract(pattern[i], timeBetweenCaptures);
 
-            th.$store.commit('setIndex', i)
-            i++
+            th.$store.commit('setIndex', i);
+            i++;
             if (i != pattern.length) {
-              await th.triggerAnimation(pattern[i - 1], pattern[i], this.animationRefreshRate)
+              await th.triggerAnimation(pattern[i - 1], pattern[i], this.animationRefreshRate);
             }
-            document.addEventListener('keydown', keydownHandler)
+            document.addEventListener('keydown', keydownHandler);
           } else {
-            th.$store.commit('setIndex', i)
-            document.removeEventListener('keydown', keydownHandler)
-            th.savePoint(whereToSave, th.usedPattern)
+            th.$store.commit('setIndex', i);
+            document.removeEventListener('keydown', keydownHandler);
+            th.savePoint(whereToSave, th.usedPattern);
             const canvas = document.getElementById('canvas');
             const ctx = canvas.getContext('2d');
-            ctx.clearRect(0, 0, canvas.width, canvas.height)
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
           }
         }
       }
-      document.addEventListener('keydown', keydownHandler)
+      document.addEventListener('keydown', keydownHandler);
     },
     nextStep() {
       this.usedPattern.forEach(element => {
         delete element.data;
       });
-      this.$store.commit('setIndex', 0)
-      this.currentStep = 2
-      this.drawPoint(this.usedPattern[0].x, this.usedPattern[0].y, 1)
-      this.advance(this.usedPattern, this.calibPredictionPoints, this.msPerCapture)
+      this.$store.commit('setIndex', 0);
+      this.currentStep = 2;
+      this.drawPoint(this.usedPattern[0].x, this.usedPattern[0].y, 1);
+      this.advance(this.usedPattern, this.calibPredictionPoints, this.msPerCapture);
     },
     async extract(point, timeBetweenCaptures) {
       point.data = [];
@@ -323,7 +321,7 @@ export default {
       }
     },
     async triggerAnimation(origin, target, animationRefreshRate) {
-      const frames = this.animationFrames
+      const frames = this.animationFrames;
       const deltaX = (target.x - origin.x) / frames;
       const deltaY = (target.y - origin.y) / frames;
 
@@ -333,7 +331,7 @@ export default {
         if (d == frames) {
           this.drawPoint(xPosition, yPosition, 1);
         } else {
-          const radius = (this.radius / frames) * (frames - d)
+          const radius = (this.radius / frames) * (frames - d);
           this.drawPoint(xPosition, yPosition, radius);
         }
         await new Promise(resolve => setTimeout(resolve, animationRefreshRate));
@@ -348,9 +346,9 @@ export default {
     drawPoint(x, y, radius) {
       const canvas = document.getElementById('canvas');
       canvas.width = window.innerWidth;
-      canvas.height = window.innerHeight
+      canvas.height = window.innerHeight;
       const ctx = canvas.getContext('2d');
-      ctx.clearRect(0, 0, canvas.width, canvas.height)
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.fillStyle = this.backgroundColor;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       //circle 
@@ -396,7 +394,8 @@ export default {
           delete element.point_y;
         });
 
-        // Generate mock predictions locally
+        // Generate mock predictions (for demonstration) 
+        // so pattern has something in it.
         const predictions = {};
         this.usedPattern.forEach(point => {
           const x = point.x.toString().split('.')[0];
@@ -406,12 +405,12 @@ export default {
             predictions[x] = {};
           }
           
-          // Generate mock prediction data
+          // Dummy mock
           predictions[x][y] = {
-            PrecisionSD: Math.random() * 2 + 1, // Random value between 1-3
-            Accuracy: Math.random() * 2 + 1,    // Random value between 1-3
-            predicted_x: point.x + (Math.random() * 20 - 10), // Original x ± 10px
-            predicted_y: point.y + (Math.random() * 20 - 10)  // Original y ± 10px
+            PrecisionSD: Math.random() * 2 + 1, // Random value
+            Accuracy: Math.random() * 2 + 1,    // Random value
+            predicted_x: point.x + (Math.random() * 20 - 10),
+            predicted_y: point.y + (Math.random() * 20 - 10)
           };
         });
 
@@ -437,10 +436,12 @@ export default {
           hasCalib: false 
         });
 
-        // Clean up and navigate
+        // Stop any recording 
         if (this.recordWebCam && typeof this.recordWebCam.stop === 'function') {
           this.stopRecord();
         }
+
+        // Start the fencing video view
         this.$store.commit('setMockPattern', []);
         this.showFencingImage = true;
         this.$nextTick(() => {
@@ -460,8 +461,8 @@ export default {
             right_iris_y: element.rightIris[1],
             point_x: point.x,
             point_y: point.y,
-          }
-          whereToSave.push(data)
+          };
+          whereToSave.push(data);
         });
       });
     },
@@ -554,50 +555,147 @@ export default {
       this.calibFinished = true;
     },
 
+    /**
+     * -------------------------------------------------------------------------
+     *  UPDATED: calculateCalibrationMatrix for LEAST SQUARES line-fitting 
+     * -------------------------------------------------------------------------
+     */
     calculateCalibrationMatrix() {
       const calibPoints = this.circleIrisPoints;
       if (!calibPoints || calibPoints.length === 0) return null;
 
-      // Group calibration points by target position
-      const pointsByTarget = {};
-      calibPoints.forEach(point => {
-        const key = `${point.point_x},${point.point_y}`;
-        if (!pointsByTarget[key]) {
-          pointsByTarget[key] = [];
+      // We'll do a linear transform that maps:
+      // avgIrisX, avgIrisY  -->  (screenX, screenY)
+      //
+      // For each calibration sample: 
+      //    X_screen = a0 + a1*(avgIrisX) + a2*(avgIrisY)
+      //    Y_screen = b0 + b1*(avgIrisX) + b2*(avgIrisY)
+      
+      const irisData = []; // [ [iris_x, iris_y, 1], [iris_x, iris_y, 1], ... ]
+      const screenDataX = []; // [ targetX1, targetX2, ... ]
+      const screenDataY = []; // [ targetY1, targetY2, ... ]
+
+      // Fill up arrays with calibration data
+      calibPoints.forEach(pt => {
+        const avgX = (pt.left_iris_x + pt.right_iris_x) / 2;
+        const avgY = (pt.left_iris_y + pt.right_iris_y) / 2;
+        irisData.push([avgX, avgY, 1]); // the 1 is for constant offset
+        screenDataX.push(pt.point_x);
+        screenDataY.push(pt.point_y);
+      });
+
+      // Solve for [a1, a2, a0] = (A^T A)^(-1) A^T X (in matrix form)
+      // We'll write a small helper that does least squares for each dimension
+      function leastSquaresSolve(A, b) {
+        // We want to solve A * params = b in a least-squares sense
+        // Using normal eqn: (A^T * A) * params = A^T * b
+        // A: Nx3  b: Nx1
+        // We'll do a basic pseudo-inverse approach. For bigger projects, use mathjs or similar.
+
+        const AT = mathTranspose(A);   // 3xN
+        const ATA = mathMultiply(AT, A); // 3x3
+        const ATb = mathMultiply(AT, b); // 3x1
+        const ATAinv = mathInverse3x3(ATA); // 3x3
+        const result = mathMultiply(ATAinv, ATb); // 3x1
+        return result; // [ a1, a2, a0 ]
+      }
+
+      // Minimal matrix ops for 3x3 invert, multiply, etc.
+      function mathTranspose(m) {
+        // m is Nx3
+        const rows = m.length;
+        const cols = m[0].length;
+        const t = [];
+        for (let c = 0; c < cols; c++) {
+          t[c] = [];
+          for (let r = 0; r < rows; r++) {
+            t[c][r] = m[r][c];
+          }
         }
-        pointsByTarget[key].push(point);
-      });
+        return t;
+      }
+      function mathMultiply(m1, m2) {
+        // naive multiply
+        const r1 = m1.length;
+        const c1 = m1[0].length;
 
-      // Find screen bounds from calibration points
-      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-      Object.keys(pointsByTarget).forEach(key => {
-        const [x, y] = key.split(',').map(Number);
-        minX = Math.min(minX, x);
-        maxX = Math.max(maxX, x);
-        minY = Math.min(minY, y);
-        maxY = Math.max(maxY, y);
-      });
+        // If m2 is a vector, c2 might be undefined, handle that
+        if (!Array.isArray(m2[0])) {
+          // so we treat m2 as a Nx1 column vector
+          const out = [];
+          for (let i = 0; i < r1; i++) {
+            let sum = 0;
+            for (let j = 0; j < c1; j++) {
+              sum += m1[i][j] * m2[j];
+            }
+            out.push(sum);
+          }
+          return out; // 1D array
+        }
 
-      this.screenBounds = { minX, maxX, minY, maxY };
-      console.log('Screen bounds:', this.screenBounds);
+        // normal matrix multiply
+        const c2 = m2[0].length;
+        const result = [];
+        for (let i = 0; i < r1; i++) {
+          result[i] = [];
+          for (let j = 0; j < c2; j++) {
+            let sum = 0;
+            for (let k = 0; k < c1; k++) {
+              sum += m1[i][k] * m2[k][j];
+            }
+            result[i][j] = sum;
+          }
+        }
+        return result;
+      }
+      function mathInverse3x3(m) {
+        // m is 3x3
+        const a = m[0][0], b = m[0][1], c = m[0][2];
+        const d = m[1][0], e = m[1][1], f = m[1][2];
+        const g = m[2][0], h = m[2][1], i = m[2][2];
 
-      // Calculate average iris positions and create calibration mapping
-      const mappings = Object.entries(pointsByTarget).map(([key, points]) => {
-        const avgLeftIrisX = points.reduce((sum, p) => sum + p.left_iris_x, 0) / points.length;
-        const avgLeftIrisY = points.reduce((sum, p) => sum + p.left_iris_y, 0) / points.length;
-        const avgRightIrisX = points.reduce((sum, p) => sum + p.right_iris_x, 0) / points.length;
-        const avgRightIrisY = points.reduce((sum, p) => sum + p.right_iris_y, 0) / points.length;
-        
-        const [targetX, targetY] = key.split(',').map(Number);
-        
-        return {
-          leftIris: { x: avgLeftIrisX, y: avgLeftIrisY },
-          rightIris: { x: avgRightIrisX, y: avgRightIrisY },
-          target: { x: targetX, y: targetY }
-        };
-      });
+        const A = e*i - f*h;
+        const B = -(d*i - f*g);
+        const C = d*h - e*g;
+        const D = -(b*i - c*h);
+        const E = a*i - c*g;
+        const F = -(a*h - b*g);
+        const G = b*f - c*e;
+        const H = -(a*f - c*d);
+        const I = a*e - b*d;
 
-      return mappings;
+        const det = a*A + b*B + c*C;
+        if (Math.abs(det) < 1e-12) {
+          // fallback if not invertible
+          console.warn("Matrix not invertible, returning identity transform");
+          return [[1,0,0],[0,1,0],[0,0,1]];
+        }
+
+        const invdet = 1.0 / det;
+        return [
+          [A*invdet, D*invdet, G*invdet],
+          [B*invdet, E*invdet, H*invdet],
+          [C*invdet, F*invdet, I*invdet]
+        ];
+      }
+
+      // Now let's solve for the transform:
+      // Construct A from irisData (Nx3)
+      //   Each row i is [ iris_x, iris_y, 1 ]
+      // bX is array of screen X (length N)
+      // bY is array of screen Y (length N)
+      const A = irisData;
+      const bX = screenDataX;
+      const bY = screenDataY;
+
+      const xParams = leastSquaresSolve(A, bX); // [ a1, a2, a0 ]
+      const yParams = leastSquaresSolve(A, bY); // [ b1, b2, b0 ]
+
+      // We can store these in an object
+      return {
+        xParams, // a1, a2, a0
+        yParams  // b1, b2, b0
+      };
     },
 
     initializeEyeTracking() {
@@ -608,8 +706,8 @@ export default {
       console.log('Calibration Matrix:', this.calibrationMatrix); // Debug log
 
       const videoElement = document.getElementById('video-tag');
-      if (!videoElement || !videoElement.videoWidth || !videoElement.videoHeight) {
-        console.error('Video element not properly initialized');
+      if (!videoElement || !this.$refs.fencingVideo) {
+        console.error('Video element/fencingVideo not properly initialized');
         return;
       }
 
@@ -677,55 +775,34 @@ export default {
       checkVideoReady();
     },
 
+    /**
+     * -------------------------------------------------------------------------
+     *  UPDATED: Use linear transform from calibrationMatrix for gaze position
+     * -------------------------------------------------------------------------
+     */
     updateGazePosition(leftIris, rightIris) {
-      const videoElement = document.getElementById('video-tag');
       const fencingVideo = this.$refs.fencingVideo;
-      
-      if (!videoElement || !fencingVideo || !this.calibrationMatrix) {
-        console.warn('Missing required elements for gaze tracking');
+      if (!fencingVideo || !this.calibrationMatrix) {
+        console.warn('Missing required elements or calibration for gaze tracking');
         return;
       }
 
-      // Find the 3 nearest calibration points based on both eyes
-      const distances = this.calibrationMatrix.map(point => {
-        const leftDist = Math.sqrt(
-          Math.pow(point.leftIris.x - leftIris[0], 2) + 
-          Math.pow(point.leftIris.y - leftIris[1], 2)
-        );
-        const rightDist = Math.sqrt(
-          Math.pow(point.rightIris.x - rightIris[0], 2) + 
-          Math.pow(point.rightIris.y - rightIris[1], 2)
-        );
-        return {
-          ...point,
-          distance: (leftDist + rightDist) / 2
-        };
-      });
+      // Average left & right
+      const avgX = (leftIris[0] + rightIris[0]) / 2;
+      const avgY = (leftIris[1] + rightIris[1]) / 2;
 
-      // Sort by distance and take top 3
-      const nearestPoints = distances
-        .sort((a, b) => a.distance - b.distance)
-        .slice(0, 3);
+      // Apply X transform
+      //  X' = a0 + a1*avgX + a2*avgY
+      const { xParams, yParams } = this.calibrationMatrix;
+      const predX = xParams[2] + xParams[0]*avgX + xParams[1]*avgY;  // [a1, a2, a0]
+      const predY = yParams[2] + yParams[0]*avgX + yParams[1]*avgY;  // [b1, b2, b0]
 
-      // Calculate weights using inverse distance weighting with higher power for better locality
-      const weights = nearestPoints.map(point => 1 / (Math.pow(point.distance, 3) + 0.0001));
-      const totalWeight = weights.reduce((sum, w) => sum + w, 0);
-      const normalizedWeights = weights.map(w => w / totalWeight);
-
-      // Calculate weighted average of target positions
-      let mappedX = 0;
-      let mappedY = 0;
-      nearestPoints.forEach((point, i) => {
-        mappedX += point.target.x * normalizedWeights[i];
-        mappedY += point.target.y * normalizedWeights[i];
-      });
-
-      // Scale the mapped position to the screen bounds
-      const scaledX = ((mappedX - this.screenBounds.minX) / (this.screenBounds.maxX - this.screenBounds.minX)) * fencingVideo.videoWidth;
-      const scaledY = ((mappedY - this.screenBounds.minY) / (this.screenBounds.maxY - this.screenBounds.minY)) * fencingVideo.videoHeight;
+      // The predicted position in the fencing video space
+      const scaledX = predX;
+      const scaledY = predY;
 
       // Check if movement is significant enough
-      const isSignificantMove = !this.lastStablePosition || 
+      const isSignificantMove = !this.lastStablePosition ||
         Math.sqrt(
           Math.pow(scaledX - this.lastStablePosition.x, 2) + 
           Math.pow(scaledY - this.lastStablePosition.y, 2)
@@ -733,7 +810,7 @@ export default {
 
       if (isSignificantMove) {
         this.lastStablePosition = { x: scaledX, y: scaledY };
-        
+
         // Update moving average window
         this.movingAverageWindow.push(this.lastStablePosition);
         if (this.movingAverageWindow.length > this.maxMovingAveragePoints) {
@@ -749,12 +826,12 @@ export default {
         const stableX = avgPosition.x / this.movingAverageWindow.length;
         const stableY = avgPosition.y / this.movingAverageWindow.length;
 
-        // Update gaze position with minimal smoothing
-        const alpha = 0.3; // Lower alpha for more stability
+        // Smooth final position
+        const alpha = 0.3; // Lower alpha => more smoothing
         this.currentGazeX = alpha * stableX + (1 - alpha) * (this.currentGazeX || stableX);
         this.currentGazeY = alpha * stableY + (1 - alpha) * (this.currentGazeY || stableY);
 
-        // Ensure within bounds
+        // Ensure within video bounds
         this.currentGazeX = Math.max(0, Math.min(this.currentGazeX, fencingVideo.videoWidth));
         this.currentGazeY = Math.max(0, Math.min(this.currentGazeY, fencingVideo.videoHeight));
       }
@@ -840,34 +917,33 @@ export default {
     },
 
     async validateCalibration() {
+      // Optional method if you want to do further validation
       const validationPoints = [];
       const screenWidth = window.innerWidth;
       const screenHeight = window.innerHeight;
       
-      // Test points in a grid
       for (let x = 0.1; x <= 0.9; x += 0.2) {
-          for (let y = 0.1; y <= 0.9; y += 0.2) {
-              validationPoints.push({
-                  x: x * screenWidth,
-                  y: y * screenHeight
-              });
-          }
+        for (let y = 0.1; y <= 0.9; y += 0.2) {
+          validationPoints.push({
+            x: x * screenWidth,
+            y: y * screenHeight
+          });
+        }
       }
       
       let totalError = 0;
       for (const point of validationPoints) {
-          const prediction = await this.predictGazePoint();
-          const error = Math.sqrt(
-              Math.pow(prediction.x - point.x, 2) + 
-              Math.pow(prediction.y - point.y, 2)
-          );
-          totalError += error;
+        const prediction = await this.predictGazePoint();
+        const error = Math.sqrt(
+          Math.pow(prediction.x - point.x, 2) + 
+          Math.pow(prediction.y - point.y, 2)
+        );
+        totalError += error;
       }
       
       const averageError = totalError / validationPoints.length;
-      if (averageError > 50) { // 50 pixels threshold
-          // Recalibrate if accuracy is poor
-          this.recalibrate();
+      if (averageError > 50) {
+        this.recalibrate();
       }
     },
 
