@@ -7,9 +7,57 @@
     </div>
 
     <div v-else-if="showFencingImage" class="fencing-container">
-      <img src="@/assets/IMG_9082.jpg" alt="Fencing" class="fencing-image" ref="fencingImage" @load="initializeEyeTracking"/>
-      <canvas id="eyeTrackingCanvas" class="eye-tracking-overlay" />
-      <canvas id="heatmapCanvas" class="eye-tracking-overlay" v-show="showHeatmap" />
+      <div class="video-container">
+        <video 
+          ref="fencingVideo"
+          class="fencing-video"
+          :src="require('@/assets/En-Garde+Lunge - Made with Clipchamp.mp4')"
+          @loadedmetadata="onVideoLoaded"
+          @timeupdate="onTimeUpdate"
+        ></video>
+        <canvas id="eyeTrackingCanvas" class="eye-tracking-overlay" />
+        <canvas id="heatmapCanvas" class="eye-tracking-overlay" v-show="showHeatmap" />
+      </div>
+
+      <div class="video-controls">
+        <div class="frame-controls">
+          <v-btn icon @click="previousFrame">
+            <v-icon>mdi-skip-previous</v-icon>
+          </v-btn>
+          <v-btn icon @click="togglePlayPause">
+            <v-icon>{{ isPlaying ? 'mdi-pause' : 'mdi-play' }}</v-icon>
+          </v-btn>
+          <v-btn icon @click="nextFrame">
+            <v-icon>mdi-skip-next</v-icon>
+          </v-btn>
+        </div>
+
+        <div class="progress-container">
+          <v-slider
+            v-model="currentFrame"
+            :min="0"
+            :max="totalFrames"
+            :step="1"
+            hide-details
+            @change="seekToFrame"
+            class="frame-slider"
+          >
+            <template v-slot:prepend>
+              <div class="frame-info">Frame: {{ currentFrame }}/{{ totalFrames }}</div>
+            </template>
+          </v-slider>
+        </div>
+
+        <div class="playback-controls">
+          <v-btn-toggle v-model="playbackSpeed" mandatory>
+            <v-btn value="0.25">0.25x</v-btn>
+            <v-btn value="0.5">0.5x</v-btn>
+            <v-btn value="1">1x</v-btn>
+            <v-btn value="2">2x</v-btn>
+          </v-btn-toggle>
+        </div>
+      </div>
+
       <div class="tracking-info">
         <div>Current Gaze Position: ({{ currentGazeX.toFixed(0) }}, {{ currentGazeY.toFixed(0) }})</div>
         <div v-if="showHeatmap" class="mt-2">
@@ -110,7 +158,13 @@ export default {
         maxX: 0,
         minY: 0,
         maxY: 0
-      }
+      },
+      currentFrame: 0,
+      totalFrames: 0,
+      isPlaying: false,
+      playbackSpeed: "1",
+      frameRate: 30, // Assuming 30fps, adjust if needed
+      lastFrameTime: 0
     };
   },
   computed: {
@@ -547,7 +601,7 @@ export default {
     },
 
     initializeEyeTracking() {
-      if (!this.$refs.fencingImage) return;
+      if (!this.$refs.fencingVideo) return;
 
       // Calculate calibration matrix first
       this.calibrationMatrix = this.calculateCalibrationMatrix();
@@ -561,12 +615,12 @@ export default {
 
       const canvas = document.getElementById('eyeTrackingCanvas');
       const heatmapCanvas = document.getElementById('heatmapCanvas');
-      const img = this.$refs.fencingImage;
+      const video = this.$refs.fencingVideo;
       
       [canvas, heatmapCanvas].forEach(c => {
         if (c) {
-          c.width = img.width;
-          c.height = img.height;
+          c.width = video.videoWidth;
+          c.height = video.videoHeight;
         }
       });
 
@@ -577,7 +631,7 @@ export default {
       this.densityMap = {};
       
       const checkVideoReady = () => {
-        if (videoElement.videoWidth && videoElement.videoHeight) {
+        if (video.videoWidth && video.videoHeight) {
           const updateGaze = async () => {
             try {
               const prediction = await this.detectFace();
@@ -625,9 +679,9 @@ export default {
 
     updateGazePosition(leftIris, rightIris) {
       const videoElement = document.getElementById('video-tag');
-      const fencingImage = this.$refs.fencingImage;
+      const fencingVideo = this.$refs.fencingVideo;
       
-      if (!videoElement || !fencingImage || !this.calibrationMatrix) {
+      if (!videoElement || !fencingVideo || !this.calibrationMatrix) {
         console.warn('Missing required elements for gaze tracking');
         return;
       }
@@ -667,8 +721,8 @@ export default {
       });
 
       // Scale the mapped position to the screen bounds
-      const scaledX = ((mappedX - this.screenBounds.minX) / (this.screenBounds.maxX - this.screenBounds.minX)) * fencingImage.width;
-      const scaledY = ((mappedY - this.screenBounds.minY) / (this.screenBounds.maxY - this.screenBounds.minY)) * fencingImage.height;
+      const scaledX = ((mappedX - this.screenBounds.minX) / (this.screenBounds.maxX - this.screenBounds.minX)) * fencingVideo.videoWidth;
+      const scaledY = ((mappedY - this.screenBounds.minY) / (this.screenBounds.maxY - this.screenBounds.minY)) * fencingVideo.videoHeight;
 
       // Check if movement is significant enough
       const isSignificantMove = !this.lastStablePosition || 
@@ -701,8 +755,8 @@ export default {
         this.currentGazeY = alpha * stableY + (1 - alpha) * (this.currentGazeY || stableY);
 
         // Ensure within bounds
-        this.currentGazeX = Math.max(0, Math.min(this.currentGazeX, fencingImage.width));
-        this.currentGazeY = Math.max(0, Math.min(this.currentGazeY, fencingImage.height));
+        this.currentGazeX = Math.max(0, Math.min(this.currentGazeX, fencingVideo.videoWidth));
+        this.currentGazeY = Math.max(0, Math.min(this.currentGazeY, fencingVideo.videoHeight));
       }
     },
 
@@ -713,8 +767,8 @@ export default {
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
 
-      const img = this.$refs.fencingImage;
-      if (!img) return;
+      const video = this.$refs.fencingVideo;
+      if (!video) return;
       
       // Update density map with new points
       this.gazeHistory.forEach(point => {
@@ -816,9 +870,105 @@ export default {
           this.recalibrate();
       }
     },
+
+    onVideoLoaded() {
+      const video = this.$refs.fencingVideo;
+      this.totalFrames = Math.floor(video.duration * this.frameRate);
+      this.initializeEyeTracking();
+      
+      // Set up keyboard controls
+      document.addEventListener('keydown', this.handleKeyPress);
+    },
+
+    onTimeUpdate() {
+      const video = this.$refs.fencingVideo;
+      this.currentFrame = Math.floor(video.currentTime * this.frameRate);
+    },
+
+    seekToFrame(frame) {
+      const video = this.$refs.fencingVideo;
+      video.currentTime = frame / this.frameRate;
+      if (!this.isPlaying) {
+        this.updateGazeForCurrentFrame();
+      }
+    },
+
+    togglePlayPause() {
+      const video = this.$refs.fencingVideo;
+      if (this.isPlaying) {
+        video.pause();
+      } else {
+        video.play();
+      }
+      this.isPlaying = !this.isPlaying;
+    },
+
+    previousFrame() {
+      if (this.isPlaying) {
+        this.togglePlayPause();
+      }
+      this.currentFrame = Math.max(0, this.currentFrame - 1);
+      this.seekToFrame(this.currentFrame);
+    },
+
+    nextFrame() {
+      if (this.isPlaying) {
+        this.togglePlayPause();
+      }
+      this.currentFrame = Math.min(this.totalFrames - 1, this.currentFrame + 1);
+      this.seekToFrame(this.currentFrame);
+    },
+
+    handleKeyPress(event) {
+      switch(event.key) {
+        case 'ArrowLeft':
+          event.preventDefault();
+          this.previousFrame();
+          break;
+        case 'ArrowRight':
+          event.preventDefault();
+          this.nextFrame();
+          break;
+        case ' ':
+          event.preventDefault();
+          this.togglePlayPause();
+          break;
+        case 'ArrowUp':
+          event.preventDefault();
+          this.heatmapIntensity = Math.min(100, this.heatmapIntensity + 5);
+          break;
+        case 'ArrowDown':
+          event.preventDefault();
+          this.heatmapIntensity = Math.max(0, this.heatmapIntensity - 5);
+          break;
+      }
+    },
+
+    async updateGazeForCurrentFrame() {
+      const prediction = await this.detectFace();
+      if (prediction && prediction[0]) {
+        const pred = prediction[0];
+        const leftIris = pred.annotations.leftEyeIris[0];
+        const rightIris = pred.annotations.rightEyeIris[0];
+
+        if (leftIris && rightIris) {
+          this.updateGazePosition(leftIris, rightIris);
+          this.drawGazeOverlay();
+        }
+      }
+    },
+  },
+
+  watch: {
+    playbackSpeed(newSpeed) {
+      if (this.$refs.fencingVideo) {
+        this.$refs.fencingVideo.playbackRate = parseFloat(newSpeed);
+      }
+    }
   },
 
   beforeDestroy() {
+    document.removeEventListener('keydown', this.handleKeyPress);
     if (this.eyeTrackingInterval) {
       clearInterval(this.eyeTrackingInterval);
     }
@@ -860,10 +1010,109 @@ html {
   background: #000;
 }
 
-.fencing-image {
+.fencing-video {
   max-width: 100%;
   max-height: 100vh;
   object-fit: contain;
+}
+
+.video-container {
+  position: relative;
+  width: 100%;
+  height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background: #000;
+}
+
+.video-controls {
+  position: absolute;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.85);
+  padding: 15px;
+  border-radius: 8px;
+  z-index: 1000;
+  width: 80%;
+  max-width: 800px;
+  backdrop-filter: blur(10px);
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.frame-controls {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  margin-bottom: 15px;
+}
+
+.frame-controls .v-btn {
+  margin: 0 10px;
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.frame-controls .v-btn:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.frame-controls .v-icon {
+  color: white !important;
+  font-size: 24px;
+}
+
+.progress-container {
+  margin: 0 20px 15px;
+}
+
+.frame-slider {
+  width: 100%;
+}
+
+.frame-info {
+  color: white;
+  font-size: 14px;
+  min-width: 120px;
+}
+
+.playback-controls {
+  display: flex;
+  justify-content: center;
+}
+
+.playback-controls .v-btn-toggle {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+}
+
+.playback-controls .v-btn {
+  color: white !important;
+  min-width: 64px;
+}
+
+.playback-controls .v-btn.v-btn--active {
+  background: rgba(255, 255, 255, 0.2) !important;
+}
+
+.tracking-info {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  background: rgba(0, 0, 0, 0.8);
+  color: white;
+  padding: 15px;
+  border-radius: 8px;
+  z-index: 1000;
+  min-width: 200px;
+  backdrop-filter: blur(10px);
+}
+
+.intensity-hint {
+  font-size: 0.8em;
+  opacity: 0.8;
+  margin-top: 4px;
+  color: rgba(255, 255, 255, 0.7);
 }
 
 .eye-tracking-overlay {
@@ -873,23 +1122,5 @@ html {
   width: 100%;
   height: 100%;
   pointer-events: none;
-}
-
-.tracking-info {
-  position: absolute;
-  top: 20px;
-  right: 20px;
-  background: rgba(0, 0, 0, 0.7);
-  color: white;
-  padding: 15px;
-  border-radius: 8px;
-  z-index: 1000;
-  min-width: 200px;
-}
-
-.intensity-hint {
-  font-size: 0.8em;
-  opacity: 0.8;
-  margin-top: 4px;
 }
 </style>
