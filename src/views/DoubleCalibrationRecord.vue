@@ -96,6 +96,21 @@ export default {
       sensitivityMultiplier: 1.5, // Adjust this value to change sensitivity
       previousGazePoints: [], // Store last few gaze points
       smoothingWindow: 3,    // Number of points to average
+      calibrationMatrix: null,
+      lastKnownGoodGaze: { x: 0, y: 0 },
+      gazeVelocity: { x: 0, y: 0 },
+      lastUpdateTime: null,
+      predictionEnabled: true,
+      stabilityThreshold: 5, // Minimum movement threshold in pixels
+      movingAverageWindow: [], // Store recent stable positions
+      maxMovingAveragePoints: 10,
+      lastStablePosition: null,
+      screenBounds: {
+        minX: 0,
+        maxX: 0,
+        minY: 0,
+        maxY: 0
+      }
     };
   },
   computed: {
@@ -485,8 +500,58 @@ export default {
       this.calibFinished = true;
     },
 
+    calculateCalibrationMatrix() {
+      const calibPoints = this.circleIrisPoints;
+      if (!calibPoints || calibPoints.length === 0) return null;
+
+      // Group calibration points by target position
+      const pointsByTarget = {};
+      calibPoints.forEach(point => {
+        const key = `${point.point_x},${point.point_y}`;
+        if (!pointsByTarget[key]) {
+          pointsByTarget[key] = [];
+        }
+        pointsByTarget[key].push(point);
+      });
+
+      // Find screen bounds from calibration points
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      Object.keys(pointsByTarget).forEach(key => {
+        const [x, y] = key.split(',').map(Number);
+        minX = Math.min(minX, x);
+        maxX = Math.max(maxX, x);
+        minY = Math.min(minY, y);
+        maxY = Math.max(maxY, y);
+      });
+
+      this.screenBounds = { minX, maxX, minY, maxY };
+      console.log('Screen bounds:', this.screenBounds);
+
+      // Calculate average iris positions and create calibration mapping
+      const mappings = Object.entries(pointsByTarget).map(([key, points]) => {
+        const avgLeftIrisX = points.reduce((sum, p) => sum + p.left_iris_x, 0) / points.length;
+        const avgLeftIrisY = points.reduce((sum, p) => sum + p.left_iris_y, 0) / points.length;
+        const avgRightIrisX = points.reduce((sum, p) => sum + p.right_iris_x, 0) / points.length;
+        const avgRightIrisY = points.reduce((sum, p) => sum + p.right_iris_y, 0) / points.length;
+        
+        const [targetX, targetY] = key.split(',').map(Number);
+        
+        return {
+          leftIris: { x: avgLeftIrisX, y: avgLeftIrisY },
+          rightIris: { x: avgRightIrisX, y: avgRightIrisY },
+          target: { x: targetX, y: targetY }
+        };
+      });
+
+      return mappings;
+    },
+
     initializeEyeTracking() {
       if (!this.$refs.fencingImage) return;
+
+      // Calculate calibration matrix first
+      this.calibrationMatrix = this.calculateCalibrationMatrix();
+      console.log('Calibration Matrix:', this.calibrationMatrix); // Debug log
 
       const videoElement = document.getElementById('video-tag');
       if (!videoElement || !videoElement.videoWidth || !videoElement.videoHeight) {
@@ -498,7 +563,6 @@ export default {
       const heatmapCanvas = document.getElementById('heatmapCanvas');
       const img = this.$refs.fencingImage;
       
-      // Set both canvas sizes to match image
       [canvas, heatmapCanvas].forEach(c => {
         if (c) {
           c.width = img.width;
@@ -506,113 +570,140 @@ export default {
         }
       });
 
-      // Reset tracking data
       this.showHeatmap = true;
       this.windowStartTime = Date.now();
+      this.lastUpdateTime = Date.now();
       this.gazeHistory = [];
       this.densityMap = {};
       
-      // Start continuous eye tracking with a slight delay to ensure video is ready
-      setTimeout(() => {
-        this.eyeTrackingInterval = setInterval(async () => {
-          try {
-            if (!videoElement.videoWidth || !videoElement.videoHeight) {
-              console.warn('Video dimensions not ready');
-              return;
-            }
+      const checkVideoReady = () => {
+        if (videoElement.videoWidth && videoElement.videoHeight) {
+          const updateGaze = async () => {
+            try {
+              const prediction = await this.detectFace();
+              if (prediction && prediction[0]) {
+                const pred = prediction[0];
+                const leftIris = pred.annotations.leftEyeIris[0];
+                const rightIris = pred.annotations.rightEyeIris[0];
 
-            const prediction = await this.detectFace();
-            if (prediction && prediction[0]) {
-              const pred = prediction[0];
-              const leftIris = pred.annotations.leftEyeIris[0];
-              const rightIris = pred.annotations.rightEyeIris[0];
+                if (leftIris && rightIris) {
+                  this.updateGazePosition(leftIris, rightIris);
+                }
 
-              this.updateGazePosition(leftIris, rightIris);
+                const now = Date.now();
+                this.gazeHistory.push({ 
+                  x: this.currentGazeX, 
+                  y: this.currentGazeY,
+                  timestamp: now
+                });
 
-              const now = Date.now();
-              
-              // Add to current window's gaze history
-              this.gazeHistory.push({ 
-                x: this.currentGazeX, 
-                y: this.currentGazeY,
-                timestamp: now
-              });
+                if (now - this.windowStartTime >= 5000) {
+                  this.generateHeatmap();
+                  this.gazeHistory = [];
+                  this.windowStartTime = now;
+                }
 
-              // Check if current 5-second window is complete
-              if (now - this.windowStartTime >= 5000) {
-                this.generateHeatmap();
-                this.gazeHistory = [];
-                this.windowStartTime = now;
+                if (canvas) {
+                  this.drawGazeOverlay();
+                }
               }
-
-              // Draw current gaze point and trail
-              if (canvas) {
-                this.drawGazeOverlay();
-              }
+              requestAnimationFrame(updateGaze);
+            } catch (error) {
+              console.error('Eye tracking error:', error);
+              requestAnimationFrame(updateGaze);
             }
-          } catch (error) {
-            console.error('Eye tracking error:', error);
-          }
-        }, 25);
-      }, 1000); // 1 second delay to ensure video is fully initialized
+          };
+          
+          requestAnimationFrame(updateGaze);
+        } else {
+          setTimeout(checkVideoReady, 100);
+        }
+      };
+      
+      checkVideoReady();
     },
 
     updateGazePosition(leftIris, rightIris) {
       const videoElement = document.getElementById('video-tag');
       const fencingImage = this.$refs.fencingImage;
       
-      if (!videoElement || !fencingImage) return;
-      
-      // Calculate center point between eyes
-      const newX = (leftIris[0] + rightIris[0]) / 2;
-      const newY = (leftIris[1] + rightIris[1]) / 2;
-      
-      // Calculate eye distance for scaling
-      const eyeDistance = Math.sqrt(
-          Math.pow(rightIris[0] - leftIris[0], 2) + 
-          Math.pow(rightIris[1] - leftIris[1], 2)
-      );
-      
-      // Get the neutral position (center of video)
-      const centerX = videoElement.videoWidth / 2;
-      const centerY = videoElement.videoHeight / 2;
-      
-      // Calculate offset from center, normalized by eye distance
-      const offsetX = (newX - centerX) / eyeDistance;
-      const offsetY = (newY - centerY) / eyeDistance;
-      
-      // Apply non-linear scaling for better edge response
-      const scaledX = Math.sign(offsetX) * Math.pow(Math.abs(offsetX) * 3, 1.5);
-      const scaledY = Math.sign(offsetY) * Math.pow(Math.abs(offsetY) * 3, 1.5);
-      
-      // Map to image dimensions with enhanced range
-      const mappedX = (0.5 + scaledX) * fencingImage.width;
-      const mappedY = (0.5 + scaledY) * fencingImage.height;
-      
-      // Apply smoothing
-      this.previousGazePoints.push({x: mappedX, y: mappedY});
-      if (this.previousGazePoints.length > this.smoothingWindow) {
-          this.previousGazePoints.shift();
+      if (!videoElement || !fencingImage || !this.calibrationMatrix) {
+        console.warn('Missing required elements for gaze tracking');
+        return;
       }
-      
-      // Weighted average (recent points have more weight)
-      let totalWeight = 0;
-      let weightedX = 0;
-      let weightedY = 0;
-      
-      this.previousGazePoints.forEach((point, index) => {
-          const weight = (index + 1);
-          weightedX += point.x * weight;
-          weightedY += point.y * weight;
-          totalWeight += weight;
+
+      // Find the 3 nearest calibration points based on both eyes
+      const distances = this.calibrationMatrix.map(point => {
+        const leftDist = Math.sqrt(
+          Math.pow(point.leftIris.x - leftIris[0], 2) + 
+          Math.pow(point.leftIris.y - leftIris[1], 2)
+        );
+        const rightDist = Math.sqrt(
+          Math.pow(point.rightIris.x - rightIris[0], 2) + 
+          Math.pow(point.rightIris.y - rightIris[1], 2)
+        );
+        return {
+          ...point,
+          distance: (leftDist + rightDist) / 2
+        };
       });
-      
-      this.currentGazeX = weightedX / totalWeight;
-      this.currentGazeY = weightedY / totalWeight;
-      
-      // Ensure coordinates stay within bounds
-      this.currentGazeX = Math.max(0, Math.min(this.currentGazeX, fencingImage.width));
-      this.currentGazeY = Math.max(0, Math.min(this.currentGazeY, fencingImage.height));
+
+      // Sort by distance and take top 3
+      const nearestPoints = distances
+        .sort((a, b) => a.distance - b.distance)
+        .slice(0, 3);
+
+      // Calculate weights using inverse distance weighting with higher power for better locality
+      const weights = nearestPoints.map(point => 1 / (Math.pow(point.distance, 3) + 0.0001));
+      const totalWeight = weights.reduce((sum, w) => sum + w, 0);
+      const normalizedWeights = weights.map(w => w / totalWeight);
+
+      // Calculate weighted average of target positions
+      let mappedX = 0;
+      let mappedY = 0;
+      nearestPoints.forEach((point, i) => {
+        mappedX += point.target.x * normalizedWeights[i];
+        mappedY += point.target.y * normalizedWeights[i];
+      });
+
+      // Scale the mapped position to the screen bounds
+      const scaledX = ((mappedX - this.screenBounds.minX) / (this.screenBounds.maxX - this.screenBounds.minX)) * fencingImage.width;
+      const scaledY = ((mappedY - this.screenBounds.minY) / (this.screenBounds.maxY - this.screenBounds.minY)) * fencingImage.height;
+
+      // Check if movement is significant enough
+      const isSignificantMove = !this.lastStablePosition || 
+        Math.sqrt(
+          Math.pow(scaledX - this.lastStablePosition.x, 2) + 
+          Math.pow(scaledY - this.lastStablePosition.y, 2)
+        ) > this.stabilityThreshold;
+
+      if (isSignificantMove) {
+        this.lastStablePosition = { x: scaledX, y: scaledY };
+        
+        // Update moving average window
+        this.movingAverageWindow.push(this.lastStablePosition);
+        if (this.movingAverageWindow.length > this.maxMovingAveragePoints) {
+          this.movingAverageWindow.shift();
+        }
+
+        // Calculate stable position using moving average
+        const avgPosition = this.movingAverageWindow.reduce(
+          (acc, pos) => ({ x: acc.x + pos.x, y: acc.y + pos.y }),
+          { x: 0, y: 0 }
+        );
+
+        const stableX = avgPosition.x / this.movingAverageWindow.length;
+        const stableY = avgPosition.y / this.movingAverageWindow.length;
+
+        // Update gaze position with minimal smoothing
+        const alpha = 0.3; // Lower alpha for more stability
+        this.currentGazeX = alpha * stableX + (1 - alpha) * (this.currentGazeX || stableX);
+        this.currentGazeY = alpha * stableY + (1 - alpha) * (this.currentGazeY || stableY);
+
+        // Ensure within bounds
+        this.currentGazeX = Math.max(0, Math.min(this.currentGazeX, fencingImage.width));
+        this.currentGazeY = Math.max(0, Math.min(this.currentGazeY, fencingImage.height));
+      }
     },
 
     generateHeatmap() {
