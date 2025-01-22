@@ -124,8 +124,8 @@ export default {
       calibPredictionPoints: [],
       calibFinished: false,
       currentStep: 1,
-      animationRefreshRate: 10,
-      animationFrames: 250,
+      animationRefreshRate: 5,
+      animationFrames: 100,
       innerCircleRadius: 5,
       usedPattern: [],
       showFencingImage: false,
@@ -233,30 +233,32 @@ export default {
   methods: {
     advance(pattern, whereToSave, timeBetweenCaptures) {
       const th = this;
-      var i = 0;
-      async function keydownHandler(event) {
-        if ((event.key === "s" || event.key === "S")) {
-          if (i <= pattern.length - 1) {
-            document.removeEventListener('keydown', keydownHandler);
-            await th.extract(pattern[i], timeBetweenCaptures);
+      let currentIndex = 0;
+      const dwellTime = 1000; // Reduced from 2000 to 1000 (1 second per point)
 
-            th.$store.commit('setIndex', i);
-            i++;
-            if (i != pattern.length) {
-              await th.triggerAnimation(pattern[i - 1], pattern[i], this.animationRefreshRate);
-            }
-            document.addEventListener('keydown', keydownHandler);
+      const processPoint = async () => {
+        if (currentIndex <= pattern.length - 1) {
+          th.$store.commit('setIndex', currentIndex);
+          await th.extract(pattern[currentIndex], timeBetweenCaptures);
+          
+          currentIndex++;
+          if (currentIndex !== pattern.length) {
+            // Trigger animation to next point
+            await th.triggerAnimation(pattern[currentIndex - 1], pattern[currentIndex], this.animationRefreshRate);
+            // Wait at the point for data collection
+            setTimeout(processPoint, dwellTime);
           } else {
-            th.$store.commit('setIndex', i);
-            document.removeEventListener('keydown', keydownHandler);
+            th.$store.commit('setIndex', currentIndex);
             th.savePoint(whereToSave, th.usedPattern);
             const canvas = document.getElementById('canvas');
             const ctx = canvas.getContext('2d');
             ctx.clearRect(0, 0, canvas.width, canvas.height);
           }
         }
-      }
-      document.addEventListener('keydown', keydownHandler);
+      };
+
+      // Start the process
+      processPoint();
     },
     nextStep() {
       this.usedPattern.forEach(element => {
@@ -477,22 +479,57 @@ export default {
             throw new Error('Video element not found');
         }
 
-        const stream = await navigator.mediaDevices.getUserMedia({
-            audio: false,
-            video: {
-                width: { ideal: 640 },
-                height: { ideal: 480 },
-                facingMode: "user"
-            }
-        });
+        // Try different video constraints in order of preference
+        const videoConstraints = [
+          // First try ideal resolution
+          {
+            width: { ideal: 640 },
+            height: { ideal: 480 },
+            facingMode: "user"
+          },
+          // Fallback to any resolution
+          {
+            facingMode: "user"
+          },
+          // Last resort - try without any constraints
+          true
+        ];
+
+        let stream = null;
+        let error = null;
+
+        // Try each constraint until one works
+        for (const constraints of videoConstraints) {
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({
+              audio: false,
+              video: constraints
+            });
+            if (stream) break; // If we got a stream, exit the loop
+          } catch (e) {
+            error = e; // Store the last error
+            console.warn('Failed with constraints:', constraints, 'Error:', e);
+            continue; // Try next constraint set
+          }
+        }
+
+        // If we still don't have a stream after trying all constraints
+        if (!stream) {
+          throw new Error(`Could not access webcam: ${error?.message || 'Unknown error'}`);
+        }
         
         videoElement.srcObject = stream;
         
         // Wait for video to be ready
-        await new Promise((resolve) => {
+        await new Promise((resolve, reject) => {
+            const timeoutId = setTimeout(() => {
+                reject(new Error('Video metadata load timeout'));
+            }, 10000); // 10 second timeout
+
             videoElement.onloadedmetadata = () => {
-                videoElement.width = 640;
-                videoElement.height = 480;
+                clearTimeout(timeoutId);
+                videoElement.width = videoElement.videoWidth || 640;
+                videoElement.height = videoElement.videoHeight || 480;
                 this.videoWidth = videoElement.videoWidth;
                 this.videoHeight = videoElement.videoHeight;
                 resolve();
@@ -500,10 +537,18 @@ export default {
         });
 
         // Wait for first frame
-        await new Promise((resolve) => {
+        await new Promise((resolve, reject) => {
+            const timeoutId = setTimeout(() => {
+                reject(new Error('Video data load timeout'));
+            }, 10000); // 10 second timeout
+
             videoElement.onloadeddata = () => {
+                clearTimeout(timeoutId);
                 // Ensure video is playing
-                videoElement.play().catch(console.error);
+                videoElement.play().catch(error => {
+                    console.error('Error playing video:', error);
+                    reject(error);
+                });
                 resolve();
             };
         });
@@ -513,6 +558,15 @@ export default {
         
       } catch (error) {
         console.error('Error accessing webcam:', error);
+        // Show user-friendly error message
+        this.$store.dispatch('showError', {
+          title: 'Camera Access Error',
+          message: `Could not access webcam: ${error.message}. Please ensure:
+          1. Your camera is properly connected
+          2. You've granted camera permissions
+          3. No other application is using the camera
+          4. Try refreshing the page`
+        });
         throw error;
       }
     },
